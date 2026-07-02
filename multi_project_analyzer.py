@@ -16,6 +16,7 @@ from watchdog.events import FileSystemEventHandler
 OLLAMA_MODEL = "qwen2.5:14b"
 CRG_PATH = "/home/chitrarth/.local/bin/code-review-graph"
 ANTIGRAVITY_PATH = "/usr/bin/antigravity"
+ORCHESTRATOR_DIR = os.path.dirname(os.path.abspath(__file__))
 
 DEFAULT_EXCLUDES = {
     "node_modules", "venv", ".git", ".next", ".expo", ".gradle", "build", 
@@ -24,6 +25,10 @@ DEFAULT_EXCLUDES = {
 
 def query_qwen(prompt, json_format=False):
     """Query the local Qwen model using Ollama API."""
+    print(f"\n=================== [OLLAMA PROMPT SENT] ===================")
+    print(prompt)
+    print("============================================================\n")
+    
     payload = {
         "model": OLLAMA_MODEL,
         "prompt": prompt,
@@ -46,7 +51,11 @@ def query_qwen(prompt, json_format=False):
         with urllib.request.urlopen(req, timeout=120) as response:
             res_data = response.read().decode('utf-8')
             res_json = json.loads(res_data)
-            return res_json.get("response", "").strip()
+            res_text = res_json.get("response", "").strip()
+            print(f"\n=================== [OLLAMA RESPONSE RECEIVED] ===================")
+            print(res_text)
+            print("==================================================================\n")
+            return res_text
     except Exception as e:
         print(f"[Ollama] Error querying Qwen: {e}")
         return None
@@ -121,6 +130,8 @@ def find_project_roots(base_dir, ignore_parser):
     project_roots = []
     print(f"[Scanner] Crawling {base_dir} to identify project folders...")
     
+    base_dir_abs = os.path.abspath(base_dir)
+    
     for root, dirs, files in os.walk(base_dir, topdown=True):
         # Load gitignore at this level
         ignore_parser.load_gitignore(root)
@@ -133,12 +144,24 @@ def find_project_roots(base_dir, ignore_parser):
                 filtered_dirs.append(d)
         dirs[:] = filtered_dirs
         
+        root_abs = os.path.abspath(root)
+        
         # Determine if this root directory is a project root
         is_root = False
         if os.path.exists(os.path.join(root, ".git")):
             is_root = True
         elif any(sig in files for sig in ["package.json", "requirements.txt", "pyproject.toml", "vite.config.js"]):
-            is_root = True
+            is_base_container = False
+            if root_abs == base_dir_abs:
+                # If there are subdirectories that are project roots, do not treat the base itself as a project root
+                for d in dirs:
+                    sub_path = os.path.join(root, d)
+                    if os.path.exists(os.path.join(sub_path, ".git")) or \
+                       any(os.path.exists(os.path.join(sub_path, sig)) for sig in ["package.json", "requirements.txt", "pyproject.toml", "vite.config.js"]):
+                        is_base_container = True
+                        break
+            if not is_base_container:
+                is_root = True
             
         if is_root:
             project_roots.append(root)
@@ -206,6 +229,77 @@ def get_git_info(project_path):
     except Exception:
         pass
     return info
+
+def extract_project_dependencies(project_path):
+    """Extracts project dependencies from files like package.json, requirements.txt, etc."""
+    dependencies = {}
+    
+    # Node/JS/TS
+    pkg_path = os.path.join(project_path, "package.json")
+    if os.path.exists(pkg_path):
+        try:
+            with open(pkg_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                dependencies["npm_dependencies"] = data.get("dependencies", {})
+                dependencies["npm_devDependencies"] = data.get("devDependencies", {})
+        except Exception:
+            pass
+            
+    # Python requirements.txt
+    req_path = os.path.join(project_path, "requirements.txt")
+    if os.path.exists(req_path):
+        try:
+            with open(req_path, "r", encoding="utf-8") as f:
+                dependencies["python_requirements"] = [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
+        except Exception:
+            pass
+            
+    # Python pyproject.toml
+    pyproj_path = os.path.join(project_path, "pyproject.toml")
+    if os.path.exists(pyproj_path):
+        try:
+            with open(pyproj_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+                deps = []
+                in_deps = False
+                for line in lines:
+                    line = line.strip()
+                    if line.startswith("[") and "dependencies" in line:
+                        in_deps = True
+                        continue
+                    if line.startswith("[") and not "dependencies" in line:
+                        in_deps = False
+                    if in_deps and line and not line.startswith("#"):
+                        deps.append(line)
+                if deps:
+                    dependencies["python_pyproject_dependencies"] = deps
+        except Exception:
+            pass
+            
+    # Go go.mod
+    go_mod_path = os.path.join(project_path, "go.mod")
+    if os.path.exists(go_mod_path):
+        try:
+            with open(go_mod_path, "r", encoding="utf-8") as f:
+                deps = []
+                in_require = False
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("require ("):
+                        in_require = True
+                        continue
+                    if line.startswith(")") and in_require:
+                        in_require = False
+                    if line.startswith("require") and not line.startswith("require ("):
+                        deps.append(line.replace("require", "").strip())
+                    elif in_require and line:
+                        deps.append(line)
+                if deps:
+                    dependencies["go_dependencies"] = deps
+        except Exception:
+            pass
+
+    return dependencies
 
 def build_ast_db(project_path):
     """Builds the AST database for code-review-graph inside the project root."""
@@ -342,13 +436,13 @@ def trigger_antigravity(findings_file, project_name):
     except Exception as e:
         print(f"[Master] Error invoking Antigravity CLI: {e}")
 
-def run_project_review(project_path, ignore_parser):
+def run_project_review(project_path, ignore_parser, mode="analyze"):
     """Executes the complete review sequence for a single project directory."""
     project_name = os.path.basename(project_path)
     project_type = classify_project(project_path)
     git_info = get_git_info(project_path)
     
-    print(f"\n=== Analyzing Project: {project_name} ===")
+    print(f"\n=== Analyzing Project: {project_name} ({mode.upper()} mode) ===")
     print(f"Path: {project_path}")
     print(f"Type: {project_type}")
     print(f"Git Branch: {git_info['branch']}")
@@ -360,6 +454,61 @@ def run_project_review(project_path, ignore_parser):
     if ast_built:
         ast_metadata = extract_ast_metadata(project_path)
         
+    if mode == "analyze":
+        dependencies = extract_project_dependencies(project_path)
+        print("[Reviewer] Querying Qwen (slave) for codebase analysis...")
+        prompt = f"""You are a Principal Software Architect.
+Provide a highly detailed, professional Technical Specification & Codebase Analysis for the project "{project_name}".
+
+Project Path: {project_path}
+Project Type: {project_type}
+Current Git Branch: {git_info['branch']}
+
+External Dependencies & Modules Used:
+{json.dumps(dependencies, indent=2)}
+
+AST Structure Summary (files, classes, functions):
+{json.dumps(ast_metadata, indent=2)}
+
+Please generate a comprehensive technical report in Markdown format containing:
+1. **Executive Summary**: High-level explanation of the project's purpose and functionality.
+2. **Tech Stack & Core Specifications**: A detailed list/table of the languages, frameworks, and libraries detected.
+3. **Modules & Dependencies**: Analysis of the main third-party dependencies used and their purpose in the application.
+4. **Codebase Architecture & File Structure**: Breakdown of files, layout, and how components interact.
+5. **Key Entities & Interfaces**: Detailed descriptions of the main classes, functions, and files found in the AST, explaining their roles.
+6. **Data Flow & Logic Flow**: How data flows through the application (e.g., API endpoints, database interactions, frontend-backend communication).
+7. **Architectural Recommendations**: Future optimizations, performance enhancements, and structure suggestions.
+
+Do not output any introductory or concluding chat remarks. Output ONLY the raw Markdown content.
+"""
+        response = query_qwen(prompt, json_format=False)
+        if not response:
+            print("[Reviewer] Failed to retrieve response from Qwen.")
+            return False
+            
+        # Log Qwen interaction
+        log_path = os.path.join(ORCHESTRATOR_DIR, f"{project_name}_interaction.log")
+        try:
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write("=== PROMPT SENT TO QWEN ===\n")
+                f.write(prompt)
+                f.write("\n\n=== RESPONSE RECEIVED FROM QWEN ===\n")
+                f.write(response)
+            print(f"[Reviewer] Logged Qwen interaction to {log_path}")
+        except Exception as e:
+            print(f"[Reviewer] Error writing interaction log: {e}")
+            
+        analysis_path = os.path.join(ORCHESTRATOR_DIR, f"{project_name}_analysis.md")
+        print(f"[Reviewer] Writing project analysis to {analysis_path}...")
+        try:
+            with open(analysis_path, "w", encoding="utf-8") as f:
+                f.write(response)
+            print("[Reviewer] ✅ Project analysis written successfully.")
+            return True
+        except Exception as e:
+            print(f"[Reviewer] Error writing analysis file: {e}")
+            return False
+
     # 2. Get modified file contents
     modified_contents = get_modified_files_content(project_path, git_info["changed_files"])
     
@@ -406,6 +555,18 @@ If no issues are found, return:
         print("[Reviewer] Failed to retrieve response from Qwen.")
         return False
         
+    # Log Qwen interaction
+    log_path = os.path.join(ORCHESTRATOR_DIR, f"{project_name}_interaction.log")
+    try:
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write("=== PROMPT SENT TO QWEN ===\n")
+            f.write(prompt)
+            f.write("\n\n=== RESPONSE RECEIVED FROM QWEN ===\n")
+            f.write(response)
+        print(f"[Reviewer] Logged Qwen interaction to {log_path}")
+    except Exception as e:
+        print(f"[Reviewer] Error writing interaction log: {e}")
+        
     try:
         res_json = json.loads(response)
         findings = res_json.get("findings", [])
@@ -433,7 +594,7 @@ If no issues are found, return:
         return True
         
     # Write findings report
-    findings_path = os.path.join(project_path, "qwen_review_findings.md")
+    findings_path = os.path.join(ORCHESTRATOR_DIR, f"{project_name}_review_findings.md")
     print(f"[Reviewer] Writing findings to {findings_path}...")
     
     report_content = f"# Qwen Code Review Findings for {project_name}\n"
@@ -469,8 +630,26 @@ def find_parent_project_root(filepath, base_path):
         # Check if current dir is a project root
         try:
             files = os.listdir(current)
-            if ".git" in files or any(sig in files for sig in ["package.json", "requirements.txt", "pyproject.toml", "vite.config.js"]):
+            if ".git" in files:
                 return current
+            if any(sig in files for sig in ["package.json", "requirements.txt", "pyproject.toml", "vite.config.js"]):
+                # If it is the base container directory, check if there are subdirectories that are project roots
+                if current == base_abs:
+                    is_base_container = False
+                    for d in files:
+                        sub_path = os.path.join(current, d)
+                        if os.path.isdir(sub_path):
+                            try:
+                                sub_files = os.listdir(sub_path)
+                                if ".git" in sub_files or any(sig in sub_files for sig in ["package.json", "requirements.txt", "pyproject.toml", "vite.config.js"]):
+                                    is_base_container = True
+                                    break
+                            except Exception:
+                                pass
+                    if not is_base_container:
+                        return current
+                else:
+                    return current
         except Exception:
             pass
         parent = os.path.dirname(current)
@@ -479,14 +658,46 @@ def find_parent_project_root(filepath, base_path):
         current = parent
     return None
 
+def schedule_watches(observer, base_path, ignore_parser, event_handler):
+    """Walks the base path dynamically, respecting ignores, and schedules non-recursive watches."""
+    watch_count = 0
+    try:
+        observer.schedule(event_handler, path=base_path, recursive=False)
+        watch_count += 1
+    except Exception as e:
+        print(f"[Watcher] Failed to watch base path {base_path}: {e}")
+        
+    for root, dirs, files in os.walk(base_path, topdown=True):
+        ignore_parser.load_gitignore(root)
+        
+        # Filter dirs in-place to respect ignores
+        filtered = []
+        for d in dirs:
+            full_path = os.path.join(root, d)
+            if not ignore_parser.is_ignored(full_path, is_dir=True):
+                filtered.append(d)
+        dirs[:] = filtered
+        
+        # Register watch for root directory
+        if root != base_path:
+            try:
+                observer.schedule(event_handler, path=root, recursive=False)
+                watch_count += 1
+            except Exception:
+                pass
+                
+    print(f"[Watcher] Successfully scheduled {watch_count} directory watches.")
+
 class ProjectChangeHandler(FileSystemEventHandler):
     """Listens for file changes and triggers immediate reviews."""
-    def __init__(self, base_path, ignore_parser, self_path, start_mtime):
+    def __init__(self, base_path, ignore_parser, self_path, start_mtime, mode="analyze", observer=None):
         self.base_path = base_path
         self.ignore_parser = ignore_parser
         self.self_path = os.path.abspath(self_path)
         self.start_mtime = start_mtime
         self.last_triggered = {}
+        self.mode = mode
+        self.observer = observer
         
     def on_modified(self, event):
         if event.is_directory:
@@ -525,9 +736,19 @@ class ProjectChangeHandler(FileSystemEventHandler):
             print(f"[Watcher] 🔍 Triggering immediate review for project: {os.path.basename(project_root)}")
             self.ignore_parser.load_gitignore(project_root)
             try:
-                run_project_review(project_root, self.ignore_parser)
+                run_project_review(project_root, self.ignore_parser, mode=self.mode)
             except Exception as e:
                 print(f"[Watcher] Error during immediate project review: {e}")
+
+    def on_created(self, event):
+        if event.is_directory and self.observer:
+            dir_path = os.path.abspath(event.src_path)
+            if not self.ignore_parser.is_ignored(dir_path, is_dir=True):
+                try:
+                    self.observer.schedule(self, path=dir_path, recursive=False)
+                    print(f"[Watcher] ➕ Dynamically watching new directory: {dir_path}")
+                except Exception:
+                    pass
 
 def main():
     parser = argparse.ArgumentParser(description="Multi-Project Code Review & Self-Healing Loop")
@@ -535,6 +756,7 @@ def main():
     parser.add_argument("--loop", action="store_true", help="Run continuously in a watcher loop")
     parser.add_argument("--interval", type=int, default=300, help="Interval in seconds between runs in loop mode (default: 300)")
     parser.add_argument("--watch", action="store_true", help="Watch base directory for immediate file modifications and review dynamically")
+    parser.add_argument("--mode", type=str, choices=["review", "analyze"], default="analyze", help="Mode: 'review' (bug finding & auto-fix) or 'analyze' (tech spec & architecture report)")
     
     args = parser.parse_args()
     
@@ -552,14 +774,26 @@ def main():
         print("==================================================")
         
         ignore_parser = GitIgnoreParser(base_path)
-        # Pre-load gitignore rules across directories
-        print("[Watcher] Initializing gitignore boundary definitions...")
-        find_project_roots(base_path, ignore_parser)
-        
-        event_handler = ProjectChangeHandler(base_path, ignore_parser, self_path, start_mtime)
         observer = Observer()
-        observer.schedule(event_handler, path=base_path, recursive=True)
-        observer.start()
+        event_handler = ProjectChangeHandler(base_path, ignore_parser, self_path, start_mtime, mode=args.mode, observer=observer)
+        
+        # Schedule watches selectively to avoid inotify exhaustion
+        print("[Watcher] Initializing gitignore boundary definitions and scheduling watches...")
+        schedule_watches(observer, base_path, ignore_parser, event_handler)
+        
+        try:
+            observer.start()
+        except OSError as e:
+            if e.errno == 28 or "inotify" in str(e).lower():
+                print("\n[Watcher] ❌ Error: Linux inotify watch limit reached.")
+                print("[Watcher] The directory tree you are trying to watch is too large for the system's current limit.")
+                print("[Watcher] To temporarily increase the limit, run:")
+                print("    sudo sysctl fs.inotify.max_user_watches=524288")
+                print("[Watcher] To make this permanent, run:")
+                print("    echo fs.inotify.max_user_watches=524288 | sudo tee -a /etc/sysctl.conf && sudo sysctl -p")
+                sys.exit(1)
+            else:
+                raise e
         
         print("[Watcher] System actively listening for file saves. Press Ctrl+C to stop.")
         try:
@@ -591,7 +825,7 @@ def main():
         
         for r in roots:
             try:
-                run_project_review(r, ignore_parser)
+                run_project_review(r, ignore_parser, mode=args.mode)
             except Exception as e:
                 print(f"[Master] Unexpected error analyzing {r}: {e}")
                 
