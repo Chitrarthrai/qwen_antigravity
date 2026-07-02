@@ -74,14 +74,41 @@ flowchart TD
 
 ## 🛠️ Requirements & Setup
 
-1. **Ollama & Qwen 2.5**
-   Ensure Ollama is running locally and the model `qwen2.5:14b` is pulled:
-   ```bash
-   ollama run qwen2.5:14b
-   ```
+### 1. Install & Configure Ollama (Local LLM Server)
+Ollama runs the local LLM used to analyze projects and review code:
+- **Download & Install**:
+  - **Linux**:
+    ```bash
+    curl -fsSL https://ollama.com/install.sh | sh
+    ```
+  - **macOS / Windows**: Download the installer from [ollama.com](https://ollama.com).
+- **Start the Ollama daemon**:
+  Normally Ollama runs as a background system service. If you need to run it manually:
+  ```bash
+  ollama serve
+  ```
+- **Download the Qwen 2.5 Model**:
+  The orchestrator targets `qwen2.5:14b`. Pull the model using:
+  ```bash
+  ollama pull qwen2.5:14b
+  ```
 
-2. **Code Review Graph**
-   The pipeline requires `code-review-graph` (CRG) installed at `~/.local/bin/code-review-graph` to build indexing databases.
+### 2. Install Code Review Graph (AST Generator)
+`code-review-graph` is a CLI tool that parses code structures and indexes them into an SQLite database:
+- **Install via pip**:
+  ```bash
+  pip install --user code-review-graph
+  ```
+- **Verify installation path**:
+  The orchestrator expects the binary to reside at:
+  `~/.local/bin/code-review-graph`
 
-3. **Antigravity CLI**
-   Used for self-healing, running under `/usr/bin/antigravity`.
+### 3. Install Python Dependencies
+Install the required python packages for file watching and events:
+```bash
+pip install watchdog
+```
+
+### 4. Configure Antigravity CLI (Self-Healing Agent)
+The self-healing workflow invokes the Antigravity agent CLI to perform autonomous code repairs:
+- Ensure the `antigravity` CLI binary is installed and executable at `/usr/bin/antigravity`.
