@@ -495,9 +495,25 @@ def trigger_antigravity(findings_file, project_name):
     except Exception as e:
         print(f"[Master] Error invoking Antigravity CLI: {e}")
 
-def run_project_review(project_path, ignore_parser, mode="analyze"):
+def get_project_file_prefix(project_path, base_path):
+    """Generate a structured, unique prefix to order and differentiate nested project files."""
+    if not base_path:
+        return os.path.basename(project_path)
+    base_abs = os.path.abspath(base_path)
+    proj_abs = os.path.abspath(project_path)
+    base_name = os.path.basename(base_abs)
+    
+    if proj_abs == base_abs:
+        return base_name
+        
+    rel_path = os.path.relpath(proj_abs, base_abs)
+    clean_rel = rel_path.replace(os.sep, "_")
+    return f"{base_name}_{clean_rel}"
+
+def run_project_review(project_path, ignore_parser, mode="analyze", base_path=None):
     """Executes the complete review sequence for a single project directory."""
     project_name = os.path.basename(project_path)
+    file_prefix = get_project_file_prefix(project_path, base_path)
     project_type = classify_project(project_path)
     git_info = get_git_info(project_path)
     
@@ -546,7 +562,7 @@ Do not output any introductory or concluding chat remarks. Output ONLY the raw M
             return False
             
         # Log Qwen interaction
-        log_path = os.path.join(ORCHESTRATOR_DIR, f"{project_name}_interaction.log")
+        log_path = os.path.join(ORCHESTRATOR_DIR, f"{file_prefix}_interaction.log")
         try:
             with open(log_path, "w", encoding="utf-8") as f:
                 f.write("=== PROMPT SENT TO QWEN ===\n")
@@ -557,7 +573,7 @@ Do not output any introductory or concluding chat remarks. Output ONLY the raw M
         except Exception as e:
             print(f"[Reviewer] Error writing interaction log: {e}")
             
-        analysis_path = os.path.join(ORCHESTRATOR_DIR, f"{project_name}_analysis.md")
+        analysis_path = os.path.join(ORCHESTRATOR_DIR, f"{file_prefix}_analysis.md")
         print(f"[Reviewer] Writing project analysis to {analysis_path}...")
         try:
             with open(analysis_path, "w", encoding="utf-8") as f:
@@ -615,7 +631,7 @@ If no issues are found, return:
         return False
         
     # Log Qwen interaction
-    log_path = os.path.join(ORCHESTRATOR_DIR, f"{project_name}_interaction.log")
+    log_path = os.path.join(ORCHESTRATOR_DIR, f"{file_prefix}_interaction.log")
     try:
         with open(log_path, "w", encoding="utf-8") as f:
             f.write("=== PROMPT SENT TO QWEN ===\n")
@@ -653,7 +669,7 @@ If no issues are found, return:
         return True
         
     # Write findings report
-    findings_path = os.path.join(ORCHESTRATOR_DIR, f"{project_name}_review_findings.md")
+    findings_path = os.path.join(ORCHESTRATOR_DIR, f"{file_prefix}_review_findings.md")
     print(f"[Reviewer] Writing findings to {findings_path}...")
     
     report_content = f"# Qwen Code Review Findings for {project_name}\n"
@@ -775,7 +791,7 @@ class ProjectChangeHandler(FileSystemEventHandler):
             print(f"[Watcher] 🔍 Triggering immediate review for project: {os.path.basename(project_root)}")
             self.ignore_parser.load_gitignore(project_root)
             try:
-                run_project_review(project_root, self.ignore_parser, mode=self.mode)
+                run_project_review(project_root, self.ignore_parser, mode=self.mode, base_path=self.base_path)
             except Exception as e:
                 print(f"[Watcher] Error during immediate project review: {e}")
 
@@ -864,7 +880,7 @@ def main():
         
         for r in roots:
             try:
-                run_project_review(r, ignore_parser, mode=args.mode)
+                run_project_review(r, ignore_parser, mode=args.mode, base_path=base_path)
             except Exception as e:
                 print(f"[Master] Unexpected error analyzing {r}: {e}")
                 
