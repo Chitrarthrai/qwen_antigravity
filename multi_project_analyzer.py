@@ -125,12 +125,80 @@ class GitIgnoreParser:
                 return True
         return False
 
+PROJECT_SIGNATURES = [
+    "package.json", "requirements.txt", "pyproject.toml", "vite.config.js", 
+    "vite.config.ts", "go.mod", "Cargo.toml", "pom.xml", "build.gradle", "Gemfile"
+]
+
+def is_project_root_dir(path):
+    """Check if a directory matches project root signature or contains .git."""
+    try:
+        files = os.listdir(path)
+        if ".git" in files:
+            return True
+        if any(sig in files for sig in PROJECT_SIGNATURES):
+            return True
+    except Exception:
+        pass
+    return False
+
+def has_source_files_direct(dir_path):
+    """Check if there are any source files directly in this directory."""
+    try:
+        for entry in os.scandir(dir_path):
+            if entry.is_file():
+                ext = os.path.splitext(entry.name)[1].lower()
+                if ext in [".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".cpp", ".c", ".h", ".java", ".kt", ".swift", ".cs"]:
+                    return True
+    except Exception:
+        pass
+    return False
+
+def has_independent_source_files_dynamic(dir_path, ignore_parser):
+    """Check recursively if there are any source files in dir_path that do not belong to nested project roots."""
+    if has_source_files_direct(dir_path):
+        return True
+        
+    try:
+        for entry in os.scandir(dir_path):
+            if entry.is_dir():
+                sub_path = entry.path
+                if not ignore_parser.is_ignored(sub_path, is_dir=True):
+                    if not is_project_root_dir(sub_path):
+                        if has_independent_source_files_dynamic(sub_path, ignore_parser):
+                            return True
+    except Exception:
+        pass
+    return False
+
+def has_nested_project_roots(dir_path, ignore_parser):
+    """Check dynamically if there are any project roots nested inside dir_path."""
+    try:
+        for root, dirs, files in os.walk(dir_path, topdown=True):
+            ignore_parser.load_gitignore(root)
+            
+            filtered = []
+            for d in dirs:
+                sub_path = os.path.join(root, d)
+                if not ignore_parser.is_ignored(sub_path, is_dir=True):
+                    filtered.append(d)
+            dirs[:] = filtered
+            
+            if os.path.abspath(root) != os.path.abspath(dir_path):
+                if is_project_root_dir(root):
+                    return True
+    except Exception:
+        pass
+    return False
+
+def is_actual_project_root(path, ignore_parser):
+    """Determine if a path is a valid project root."""
+    return is_project_root_dir(path)
+
 def find_project_roots(base_dir, ignore_parser):
     """Walk directories to find project roots dynamically, respecting boundaries."""
     project_roots = []
     print(f"[Scanner] Crawling {base_dir} to identify project folders...")
-    
-    base_dir_abs = os.path.abspath(base_dir)
     
     for root, dirs, files in os.walk(base_dir, topdown=True):
         # Load gitignore at this level
@@ -144,30 +212,8 @@ def find_project_roots(base_dir, ignore_parser):
                 filtered_dirs.append(d)
         dirs[:] = filtered_dirs
         
-        root_abs = os.path.abspath(root)
-        
-        # Determine if this root directory is a project root
-        is_root = False
-        if os.path.exists(os.path.join(root, ".git")):
-            is_root = True
-        elif any(sig in files for sig in ["package.json", "requirements.txt", "pyproject.toml", "vite.config.js"]):
-            is_base_container = False
-            if root_abs == base_dir_abs:
-                # If there are subdirectories that are project roots, do not treat the base itself as a project root
-                for d in dirs:
-                    sub_path = os.path.join(root, d)
-                    if os.path.exists(os.path.join(sub_path, ".git")) or \
-                       any(os.path.exists(os.path.join(sub_path, sig)) for sig in ["package.json", "requirements.txt", "pyproject.toml", "vite.config.js"]):
-                        is_base_container = True
-                        break
-            if not is_base_container:
-                is_root = True
-            
-        if is_root:
+        if is_actual_project_root(root, ignore_parser):
             project_roots.append(root)
-            # Once we find a project root, we don't look for sub-projects inside it
-            # unless it's a monorepo setup, but to keep boundaries clean, we stop descending
-            dirs.clear()
             
     return project_roots
 
@@ -178,6 +224,10 @@ def classify_project(project_path):
     has_pyproject = os.path.exists(os.path.join(project_path, "pyproject.toml"))
     has_vite = any(os.path.exists(os.path.join(project_path, f)) for f in ["vite.config.js", "vite.config.ts"])
     has_manage_py = os.path.exists(os.path.join(project_path, "manage.py"))
+    has_go_mod = os.path.exists(os.path.join(project_path, "go.mod"))
+    has_cargo = os.path.exists(os.path.join(project_path, "Cargo.toml"))
+    has_pom = os.path.exists(os.path.join(project_path, "pom.xml"))
+    has_gradle = os.path.exists(os.path.join(project_path, "build.gradle"))
     
     project_types = []
     
@@ -200,6 +250,15 @@ def classify_project(project_path):
         
     if has_requirements or has_pyproject or has_manage_py or any(f.endswith(".py") for f in os.listdir(project_path) if os.path.isfile(os.path.join(project_path, f))):
         project_types.append("Python")
+        
+    if has_go_mod:
+        project_types.append("Go")
+        
+    if has_cargo:
+        project_types.append("Rust")
+        
+    if has_pom or has_gradle:
+        project_types.append("Java/Kotlin")
         
     if not project_types:
         return "Unknown"
@@ -622,36 +681,16 @@ If no issues are found, return:
     trigger_antigravity(findings_path, project_name)
     return True
 
-def find_parent_project_root(filepath, base_path):
+def find_parent_project_root(filepath, base_path, ignore_parser=None):
     """Walk up parent directories of a modified file to find its project root."""
     current = os.path.dirname(os.path.abspath(filepath))
     base_abs = os.path.abspath(base_path)
+    if ignore_parser is None:
+        ignore_parser = GitIgnoreParser(base_abs)
+        
     while len(current) >= len(base_abs):
-        # Check if current dir is a project root
-        try:
-            files = os.listdir(current)
-            if ".git" in files:
-                return current
-            if any(sig in files for sig in ["package.json", "requirements.txt", "pyproject.toml", "vite.config.js"]):
-                # If it is the base container directory, check if there are subdirectories that are project roots
-                if current == base_abs:
-                    is_base_container = False
-                    for d in files:
-                        sub_path = os.path.join(current, d)
-                        if os.path.isdir(sub_path):
-                            try:
-                                sub_files = os.listdir(sub_path)
-                                if ".git" in sub_files or any(sig in sub_files for sig in ["package.json", "requirements.txt", "pyproject.toml", "vite.config.js"]):
-                                    is_base_container = True
-                                    break
-                            except Exception:
-                                pass
-                    if not is_base_container:
-                        return current
-                else:
-                    return current
-        except Exception:
-            pass
+        if is_actual_project_root(current, ignore_parser):
+            return current
         parent = os.path.dirname(current)
         if parent == current:
             break
@@ -731,7 +770,7 @@ class ProjectChangeHandler(FileSystemEventHandler):
         self.last_triggered[filepath] = now
         
         print(f"\n[Watcher] 📝 Change detected in: {filepath}")
-        project_root = find_parent_project_root(filepath, self.base_path)
+        project_root = find_parent_project_root(filepath, self.base_path, self.ignore_parser)
         if project_root:
             print(f"[Watcher] 🔍 Triggering immediate review for project: {os.path.basename(project_root)}")
             self.ignore_parser.load_gitignore(project_root)
