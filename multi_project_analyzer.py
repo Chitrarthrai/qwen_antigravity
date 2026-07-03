@@ -88,7 +88,8 @@ class GitIgnoreParser:
                             self.patterns.append({
                                 "pattern": clean_pattern,
                                 "rel_base": rel_base,
-                                "is_dir_only": is_dir_only
+                                "is_dir_only": is_dir_only,
+                                "dir_path": os.path.abspath(dir_path)
                             })
             except Exception as e:
                 print(f"[Scanner] Error reading gitignore in {dir_path}: {e}")
@@ -102,9 +103,19 @@ class GitIgnoreParser:
             if fnmatch.fnmatch(name, pattern):
                 return True
                 
+        full_path_abs = os.path.abspath(full_path)
         rel_path = os.path.relpath(full_path, self.root_dir).replace("\\", "/")
         
         for p in self.patterns:
+            pattern_dir = p.get("dir_path")
+            if pattern_dir:
+                try:
+                    rel_to_pattern_dir = os.path.relpath(full_path_abs, pattern_dir)
+                    if rel_to_pattern_dir.startswith(".."):
+                        continue
+                except ValueError:
+                    continue
+
             pattern = p["pattern"]
             base = p["rel_base"]
             is_dir_only = p["is_dir_only"]
@@ -191,9 +202,14 @@ def has_nested_project_roots(dir_path, ignore_parser):
         pass
     return False
 
-def is_actual_project_root(path, ignore_parser):
-    """Determine if a path is a valid project root."""
-    return is_project_root_dir(path)
+def is_actual_project_root(path, ignore_parser, base_dir=None):
+    """Determine if a path is a valid project root, avoiding base container ambiguity."""
+    if not is_project_root_dir(path):
+        return False
+    if base_dir and os.path.abspath(path) == os.path.abspath(base_dir):
+        if has_nested_project_roots(path, ignore_parser):
+            return False
+    return True
 
 def find_project_roots(base_dir, ignore_parser):
     """Walk directories to find project roots dynamically, respecting boundaries."""
@@ -212,10 +228,108 @@ def find_project_roots(base_dir, ignore_parser):
                 filtered_dirs.append(d)
         dirs[:] = filtered_dirs
         
-        if is_actual_project_root(root, ignore_parser):
+        if is_actual_project_root(root, ignore_parser, base_dir=base_dir):
             project_roots.append(root)
+            dirs.clear()
             
     return project_roots
+
+def generate_dirs_file(dirs_file, base_dir, ignore_parser):
+    """Walk base_dir and write all non-ignored directories to dirs_file."""
+    print(f"[Scanner] Auto-generating directory list file at {dirs_file}...")
+    dir_paths = []
+    
+    for root, dirs, files in os.walk(base_dir, topdown=True):
+        ignore_parser.load_gitignore(root)
+        
+        filtered = []
+        for d in dirs:
+            full_path = os.path.join(root, d)
+            if not ignore_parser.is_ignored(full_path, is_dir=True):
+                filtered.append(d)
+        dirs[:] = filtered
+        
+        rel_path = os.path.relpath(root, base_dir)
+        if rel_path == ".":
+            dir_paths.append(".")
+        else:
+            dir_paths.append("./" + rel_path.replace(os.sep, "/"))
+            
+    try:
+        parent_dir = os.path.dirname(dirs_file)
+        if parent_dir and not os.path.exists(parent_dir):
+            os.makedirs(parent_dir, exist_ok=True)
+            
+        with open(dirs_file, "w", encoding="utf-8") as f:
+            for dp in dir_paths:
+                f.write(dp + "\n")
+        print(f"[Scanner] Successfully generated directory list with {len(dir_paths)} directories.")
+    except Exception as e:
+        print(f"[Scanner] Error generating dirs file {dirs_file}: {e}")
+
+def find_project_roots_from_file(dirs_file, base_dir, ignore_parser):
+    """Find project roots by reading a list of directory paths from a file."""
+    project_roots = []
+    print(f"[Scanner] Reading directory list from {dirs_file}...")
+    
+    try:
+        with open(dirs_file, "r", encoding="utf-8") as f:
+            paths = [line.strip() for line in f if line.strip()]
+    except Exception as e:
+        print(f"[Scanner] Error reading dirs file {dirs_file}: {e}")
+        return []
+        
+    # Resolve all paths relative to base_dir and convert to absolute paths
+    abs_paths = []
+    for p in paths:
+        if p.startswith("./") or p.startswith(".\\"):
+            p = p[2:]
+        elif p == ".":
+            p = ""
+        abs_path = os.path.abspath(os.path.join(base_dir, p))
+        abs_paths.append(abs_path)
+        
+    # Sort paths by length so parents are processed before children
+    abs_paths.sort(key=len)
+    
+    # Load gitignores hierarchically up to base_dir for each path, caching already loaded dirs
+    loaded_dirs = set()
+    for path in abs_paths:
+        curr = path
+        parents_to_load = []
+        while len(curr) >= len(base_dir):
+            if curr not in loaded_dirs:
+                parents_to_load.append(curr)
+            parent = os.path.dirname(curr)
+            if parent == curr:
+                break
+            curr = parent
+        # Load from base down to current dir
+        for p_dir in reversed(parents_to_load):
+            ignore_parser.load_gitignore(p_dir)
+            loaded_dirs.add(p_dir)
+            
+    # Identify project roots and prune nested project roots efficiently using a set
+    pruned_dirs = set()
+    project_roots_set = set()
+    for path in abs_paths:
+        parent = os.path.dirname(path)
+        # If parent is a project root, or parent is itself pruned, prune this child
+        if parent in project_roots_set or parent in pruned_dirs:
+            pruned_dirs.add(path)
+            continue
+            
+        if ignore_parser.is_ignored(path, is_dir=True):
+            pruned_dirs.add(path)
+            continue
+            
+        if is_actual_project_root(path, ignore_parser, base_dir=base_dir):
+            project_roots.append(path)
+            project_roots_set.add(path)
+            
+    return project_roots
+
+
 
 def classify_project(project_path):
     """Detect the tech stack details of a project path."""
@@ -705,7 +819,7 @@ def find_parent_project_root(filepath, base_path, ignore_parser=None):
         ignore_parser = GitIgnoreParser(base_abs)
         
     while len(current) >= len(base_abs):
-        if is_actual_project_root(current, ignore_parser):
+        if is_actual_project_root(current, ignore_parser, base_dir=base_abs):
             return current
         parent = os.path.dirname(current)
         if parent == current:
@@ -875,7 +989,16 @@ def main():
         
         # Instantiate dynamic gitignore and crawler
         ignore_parser = GitIgnoreParser(base_path)
-        roots = find_project_roots(base_path, ignore_parser)
+        dirs_file_path = os.path.join(base_path, "dirlist_temp.txt")
+        generate_dirs_file(dirs_file_path, base_path, ignore_parser)
+        try:
+            roots = find_project_roots_from_file(dirs_file_path, base_path, ignore_parser)
+        finally:
+            if os.path.exists(dirs_file_path):
+                try:
+                    os.remove(dirs_file_path)
+                except Exception:
+                    pass
         print(f"[Master] Found {len(roots)} projects to review.")
         
         for r in roots:

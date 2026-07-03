@@ -43,6 +43,7 @@ flowchart TD
 ## ⚡ Key Features
 
 - **Recursive Nested Scan**: Crawls all subdirectories to identify independent frontend, backend, and mobile applications nested inside monorepos or container repositories.
+- **Optimized Tree Traversal**: Auto-generates and parses a temporary directory file (`dirlist_temp.txt`) internally to process and prune nested project structures in $O(N)$ time using set-based directory lookup and gitignore caching, cleaning up after execution.
 - **Dynamic Ignores**: Parses `.gitignore` dynamically alongside default ignores (`node_modules`, `.git`, `venv`, etc.) to prevent indexing of massive/ignored folders.
 - **Stack Classification**: Automatically detects and classifies technology stacks including React Native, React, Node.js, Vite, Python, Go, Rust, and Java/Kotlin.
 - **Anti-Hallucination filter**: Enforces structured JSON findings from local Qwen models and cross-references reported classes/functions/variables against the `code-review-graph` SQLite index.
