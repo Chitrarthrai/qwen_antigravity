@@ -57,9 +57,9 @@ flowchart TD
 
 | Command | Mode | Description |
 | :--- | :--- | :--- |
-| `python3 multi_project_analyzer.py --base <path>` | **One-time Sweep** | Crawls the directory once, analyzes all projects, writes tech summaries, and terminates. |
-| `python3 multi_project_analyzer.py --base <path> --loop --interval 300` | **Loop Daemon** | Runs indefinitely, performing a sweep of the workspace folder every 5 minutes. |
-| `python3 multi_project_analyzer.py --base <path> --watch` | **Event Watcher** | Listens for file saves and triggers an immediate, targeted review/fix cycle on the active project. |
+| `python3 backend/multi_project_analyzer.py --base <path>` | **One-time Sweep** | Crawls the directory once, analyzes all projects, writes tech summaries, and terminates. |
+| `python3 backend/multi_project_analyzer.py --base <path> --loop --interval 300` | **Loop Daemon** | Runs indefinitely, performing a sweep of the workspace folder every 5 minutes. |
+| `python3 backend/multi_project_analyzer.py --base <path> --watch` | **Event Watcher** | Listens for file saves and triggers an immediate, targeted review/fix cycle on the active project. |
 
 ### CLI Options
 
@@ -113,3 +113,24 @@ pip install watchdog
 ### 4. Configure Antigravity CLI (Self-Healing Agent)
 The self-healing workflow invokes the Antigravity agent CLI to perform autonomous code repairs:
 - Ensure the `antigravity` CLI binary is installed and executable at `/usr/bin/antigravity`.
+
+---
+
+## 🖥️ Dashboard & Web Interface
+
+The project includes a state-of-the-art Control Dashboard to monitor projects, AST visualizers, and resume tailoring status.
+
+### 1. Build and Run the Dashboard Server
+To start the backend server and static asset host:
+```bash
+python3 backend/server.py
+```
+This launches the server at `http://localhost:8000`.
+
+### 2. Development Mode
+To run the React frontend in hot-reload development mode:
+```bash
+cd dashboard
+npm install
+npm run dev
+```

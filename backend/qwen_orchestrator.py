@@ -5,11 +5,16 @@ import argparse
 import subprocess
 import json
 import urllib.request
+import re
 
-# Central Configurations
-QWEN_DIR = "/home/chitrarth/Chitrarth/Project P/qwen_antigravity"
-RESUME_PATH = "/home/chitrarth/Chitrarth/Project P/overleaf/main.tex"
-FINDINGS_PATH = os.path.join(QWEN_DIR, "qwen_findings.md")
+# Dynamic Paths Configuration
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(SCRIPT_DIR) if os.path.basename(SCRIPT_DIR) == "backend" else SCRIPT_DIR
+PARENT_DIR = os.path.dirname(ROOT_DIR)
+
+QWEN_DIR = SCRIPT_DIR
+RESUME_PATH = os.path.join(PARENT_DIR, "overleaf", "main.tex")
+FINDINGS_PATH = os.path.join(ROOT_DIR, "qwen_findings.md")
 OLLAMA_MODEL = "qwen2.5:14b"
 
 def query_qwen(prompt, json_format=False):
@@ -140,16 +145,22 @@ Please analyze the execution logs, check [main.tex](file://{RESUME_PATH}), and m
     # Validate LaTeX structure after optimization
     return run_latex_validation()
 
-def run_ats_scoring():
+def run_ats_scoring(jd_text=None, jd_file=None):
     """Runs the ATS Scoring script and checks if score meets target threshold."""
     print("\n[Orchestrator] Running ATS Resume Scoring...")
     scorer_script = os.path.join(QWEN_DIR, "ats_scorer.py")
     
-    result = subprocess.run(["python3", scorer_script], capture_output=True, text=True)
+    cmd = ["python3", scorer_script]
+    if jd_file:
+        cmd.extend(["--jd", jd_file])
+    elif jd_text:
+        cmd.extend(["--text", jd_text])
+        
+    result = subprocess.run(cmd, capture_output=True, text=True)
     print(result.stdout)
     
     # Read the generated report to verify score
-    report_path = os.path.join(QWEN_DIR, "ats_score_report.md")
+    report_path = os.path.join(ROOT_DIR, "ats_score_report.md")
     if not os.path.exists(report_path):
         print("[Orchestrator] ❌ ATS Score report was not generated.")
         return False
@@ -186,8 +197,6 @@ Please read the recommendations in [ats_score_report.md](file://{report_path}), 
     print(f"[Orchestrator] 🎉 Success! ATS Score is {score}/100 (>= 90).")
     return True
 
-import re
-
 def main():
     parser = argparse.ArgumentParser(description="Qwen-to-Antigravity Task Orchestrator")
     parser.add_argument(
@@ -196,8 +205,8 @@ def main():
         required=True,
         help="The automated task to run."
     )
-    parser.add_argument("--jd", type=str, help="Path to job description file (for optimize-resume)")
-    parser.add_argument("--text", type=str, help="Raw job description text (for optimize-resume)")
+    parser.add_argument("--jd", type=str, help="Path to job description file (for optimize/score-resume)")
+    parser.add_argument("--text", type=str, help="Raw job description text (for optimize/score-resume)")
     parser.add_argument("--prompt", type=str, help="Custom prompt for Qwen (for run-custom)")
     
     args = parser.parse_args()
@@ -207,7 +216,7 @@ def main():
     elif args.task == "optimize-resume":
         run_ats_optimization(jd_text=args.text, jd_file=args.jd)
     elif args.task == "score-resume":
-        run_ats_scoring()
+        run_ats_scoring(jd_text=args.text, jd_file=args.jd)
     elif args.task == "run-custom":
         if not args.prompt:
             print("Error: --prompt is required for run-custom task.")

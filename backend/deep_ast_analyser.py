@@ -4,7 +4,10 @@ import urllib.request
 import sqlite3
 import subprocess
 
-# Configuration
+# Dynamic Paths Configuration
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(SCRIPT_DIR) if os.path.basename(SCRIPT_DIR) == "backend" else SCRIPT_DIR
+
 PROJECTS = {
     "Neo Disha (Native App)": "/home/chitrarth/Chitrarth/IRM/neodisha_native",
     "FinanceTask": "/home/chitrarth/Chitrarth/Project P/FinanceTask",
@@ -13,7 +16,7 @@ PROJECTS = {
 }
 OLLAMA_MODEL = "qwen2.5:14b"
 CRG_PATH = "/home/chitrarth/.local/bin/code-review-graph"
-OUTPUT_REPORT_PATH = "/home/chitrarth/Chitrarth/Project P/qwen_antigravity/deep_codebase_architecture.md"
+OUTPUT_REPORT_PATH = os.path.join(ROOT_DIR, "deep_codebase_architecture.md")
 
 def query_qwen(prompt):
     payload = {

@@ -3,10 +3,15 @@ import re
 import json
 import urllib.request
 
-# Configuration
-RESUME_PATH = "/home/chitrarth/Chitrarth/Project P/overleaf/main.tex"
+# Dynamic Paths Configuration
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(SCRIPT_DIR) if os.path.basename(SCRIPT_DIR) == "backend" else SCRIPT_DIR
+PARENT_DIR = os.path.dirname(ROOT_DIR)
+
+RESUME_PATH = os.path.join(PARENT_DIR, "overleaf", "main.tex")
+REPORT_PATH = os.path.join(ROOT_DIR, "ats_score_report.md")
+
 OLLAMA_MODEL = "qwen2.5:14b"
-REPORT_PATH = "/home/chitrarth/Chitrarth/Project P/qwen_antigravity/ats_score_report.md"
 
 def query_qwen(prompt, json_format=False):
     payload = {
@@ -36,7 +41,7 @@ def query_qwen(prompt, json_format=False):
         print(f"Error querying Qwen: {e}")
         return None
 
-def score_resume():
+def score_resume(jd_text=None, jd_file=None):
     print("[ATS Scorer] Analyzing main.tex content...")
     if not os.path.exists(RESUME_PATH):
         print(f"Resume not found at: {RESUME_PATH}")
@@ -45,12 +50,22 @@ def score_resume():
     with open(RESUME_PATH, "r", encoding="utf-8") as f:
         content = f.read()
 
-    # Target job description (Standard Senior/Security Mobile Developer)
-    jd_content = """
-    Looking for a Senior Mobile & Full Stack Engineer with strong experience in React Native, Kotlin, and JavaScript/TypeScript.
-    Experience implementing secure mobile authentication, SSL certificate pinning, encryption, obfuscation, VAPT hardening, 
-    and high-performance camera integration. Experience in Node.js, Express, MongoDB, Next.js, and Cloud Infrastructure (Azure).
-    """
+    # Target job description
+    if jd_file and os.path.exists(jd_file):
+        try:
+            with open(jd_file, "r", encoding="utf-8") as f:
+                jd_content = f.read()
+        except Exception as e:
+            print(f"Error reading Job Description file: {e}")
+            return
+    elif jd_text:
+        jd_content = jd_text
+    else:
+        jd_content = """
+        Looking for a Senior Mobile & Full Stack Engineer with strong experience in React Native, Kotlin, and JavaScript/TypeScript.
+        Experience implementing secure mobile authentication, SSL certificate pinning, encryption, obfuscation, VAPT hardening, 
+        and high-performance camera integration. Experience in Node.js, Express, MongoDB, Next.js, and Cloud Infrastructure (Azure).
+        """
 
     # Query Qwen to perform keyword extraction and matching
     print("[ATS Scorer] Matching keywords against job description using local Qwen...")
@@ -161,4 +176,9 @@ The scanner identified the following strong quantitative statements:
     print("[ATS Scorer] Report saved successfully!")
 
 if __name__ == "__main__":
-    score_resume()
+    import argparse
+    parser = argparse.ArgumentParser(description="ATS Resume Scoring Tool")
+    parser.add_argument("--jd", type=str, help="Path to job description file")
+    parser.add_argument("--text", type=str, help="Raw job description text")
+    args = parser.parse_args()
+    score_resume(jd_text=args.text, jd_file=args.jd)

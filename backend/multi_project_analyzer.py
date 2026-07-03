@@ -16,7 +16,8 @@ from watchdog.events import FileSystemEventHandler
 OLLAMA_MODEL = "qwen2.5:14b"
 CRG_PATH = "/home/chitrarth/.local/bin/code-review-graph"
 ANTIGRAVITY_PATH = "/usr/bin/antigravity"
-ORCHESTRATOR_DIR = os.path.dirname(os.path.abspath(__file__))
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+ORCHESTRATOR_DIR = os.path.dirname(_script_dir) if os.path.basename(_script_dir) == "backend" else _script_dir
 
 DEFAULT_EXCLUDES = {
     "node_modules", "venv", ".git", ".next", ".expo", ".gradle", "build", 
@@ -474,19 +475,24 @@ def extract_project_dependencies(project_path):
 
     return dependencies
 
-def build_ast_db(project_path):
+def build_ast_db(project_path, force=False):
     """Builds the AST database for code-review-graph inside the project root."""
     db_path = os.path.join(project_path, ".code-review-graph", "graph.db")
-    if os.path.exists(db_path):
+    if os.path.exists(db_path) and not force:
         print(f"[AST] Found existing database for {os.path.basename(project_path)}.")
         return True
         
-    print(f"[AST] Generating AST database for {os.path.basename(project_path)}...")
+    print(f"[AST] Generating/Updating AST database for {os.path.basename(project_path)}...")
     if not os.path.exists(CRG_PATH):
         print(f"[AST] Warning: code-review-graph not found at {CRG_PATH}")
         return False
         
     try:
+        if force and os.path.exists(db_path):
+            try:
+                os.remove(db_path)
+            except Exception:
+                pass
         res = subprocess.run(
             [CRG_PATH, "build"],
             cwd=project_path,
@@ -497,6 +503,29 @@ def build_ast_db(project_path):
         return res.returncode == 0 and os.path.exists(db_path)
     except Exception as e:
         print(f"[AST] Failed to build AST database: {e}")
+        return False
+
+def verify_entity_exists(db_path, entity_name, file_path):
+    """Verify in the SQLite database if the entity exists in the specified file."""
+    if not os.path.exists(db_path):
+        return False
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        normalized_file = file_path.replace("\\", "/")
+        cursor.execute("""
+            SELECT COUNT(*) FROM nodes 
+            WHERE name = ? AND (
+                file_path = ? OR 
+                file_path LIKE ? OR 
+                qualified_name LIKE ?
+            );
+        """, (entity_name, normalized_file, f"%/{normalized_file}", f"%{entity_name}%"))
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count > 0
+    except Exception as e:
+        print(f"[Verifier] SQLite Verification Error: {e}")
         return False
 
 def extract_ast_metadata(project_path):
@@ -543,17 +572,10 @@ def get_modified_files_content(project_path, changed_files):
                     pass
     return contents
 
-def filter_hallucinations(project_path, findings, ast_metadata):
+def filter_hallucinations(project_path, findings, db_path):
     """Verifies that the file paths and entities reported by Qwen actually exist."""
     verified_findings = []
     
-    # Pre-extract all known class/function names from AST for quick validation
-    known_entities = set()
-    for c in ast_metadata.get("classes", []):
-        known_entities.add(c["name"])
-    for f in ast_metadata.get("functions", []):
-        known_entities.add(f["name"])
-        
     for finding in findings:
         file_path = finding.get("file_path", "")
         entity_name = finding.get("entity_name", "")
@@ -565,10 +587,11 @@ def filter_hallucinations(project_path, findings, ast_metadata):
             
         # Check if entity is valid in AST or file contents
         if entity_name:
-            # Check if it exists in AST
-            if entity_name in known_entities:
-                verified_findings.append(finding)
-                continue
+            # Check SQL database first
+            if os.path.exists(db_path):
+                if verify_entity_exists(db_path, entity_name, file_path):
+                    verified_findings.append(finding)
+                    continue
                 
             # Fallback: check if the string exists in the file contents
             try:
@@ -624,7 +647,7 @@ def get_project_file_prefix(project_path, base_path):
     clean_rel = rel_path.replace(os.sep, "_")
     return f"{base_name}_{clean_rel}"
 
-def run_project_review(project_path, ignore_parser, mode="analyze", base_path=None):
+def run_project_review(project_path, ignore_parser, mode="analyze", base_path=None, force_ast_rebuild=False):
     """Executes the complete review sequence for a single project directory."""
     project_name = os.path.basename(project_path)
     file_prefix = get_project_file_prefix(project_path, base_path)
@@ -638,7 +661,8 @@ def run_project_review(project_path, ignore_parser, mode="analyze", base_path=No
     print(f"Active Changes: {len(git_info['changed_files'])} files modified")
     
     # 1. Update/Build AST
-    ast_built = build_ast_db(project_path)
+    should_force = force_ast_rebuild or len(git_info.get("changed_files", [])) > 0
+    ast_built = build_ast_db(project_path, force=should_force)
     ast_metadata = {}
     if ast_built:
         ast_metadata = extract_ast_metadata(project_path)
@@ -648,17 +672,17 @@ def run_project_review(project_path, ignore_parser, mode="analyze", base_path=No
         print("[Reviewer] Querying Qwen (slave) for codebase analysis...")
         prompt = f"""You are a Principal Software Architect.
 Provide a highly detailed, professional Technical Specification & Codebase Analysis for the project "{project_name}".
-
+ 
 Project Path: {project_path}
 Project Type: {project_type}
 Current Git Branch: {git_info['branch']}
-
+ 
 External Dependencies & Modules Used:
 {json.dumps(dependencies, indent=2)}
-
+ 
 AST Structure Summary (files, classes, functions):
 {json.dumps(ast_metadata, indent=2)}
-
+ 
 Please generate a comprehensive technical report in Markdown format containing:
 1. **Executive Summary**: High-level explanation of the project's purpose and functionality.
 2. **Tech Stack & Core Specifications**: A detailed list/table of the languages, frameworks, and libraries detected.
@@ -667,7 +691,7 @@ Please generate a comprehensive technical report in Markdown format containing:
 5. **Key Entities & Interfaces**: Detailed descriptions of the main classes, functions, and files found in the AST, explaining their roles.
 6. **Data Flow & Logic Flow**: How data flows through the application (e.g., API endpoints, database interactions, frontend-backend communication).
 7. **Architectural Recommendations**: Future optimizations, performance enhancements, and structure suggestions.
-
+ 
 Do not output any introductory or concluding chat remarks. Output ONLY the raw Markdown content.
 """
         response = query_qwen(prompt, json_format=False)
@@ -697,21 +721,21 @@ Do not output any introductory or concluding chat remarks. Output ONLY the raw M
         except Exception as e:
             print(f"[Reviewer] Error writing analysis file: {e}")
             return False
-
+ 
     # 2. Get modified file contents
     modified_contents = get_modified_files_content(project_path, git_info["changed_files"])
     
     # 3. Construct LLM Prompt
     prompt = f"""You are a Principal Software Engineer & Code Reviewer.
 Analyze the codebase information for the project "{project_name}" and identify bugs, security vulnerabilities, syntax issues, or code quality improvements.
-
+ 
 Project Type: {project_type}
 Current Git Branch: {git_info['branch']}
 Modified/Untracked Files: {json.dumps(git_info['changed_files'])}
-
+ 
 AST Structure Summary (files, classes, functions):
 {json.dumps(ast_metadata, indent=2)}
-
+ 
 File Contents of Modified Files:
 """
     for file, content in modified_contents.items():
@@ -737,7 +761,7 @@ If no issues are found, return:
   "findings": []
 }
 """
-
+ 
     print("[Reviewer] Querying Qwen (slave) for code review...")
     response = query_qwen(prompt, json_format=True)
     if not response:
@@ -775,7 +799,8 @@ If no issues are found, return:
         return True
         
     print(f"[Reviewer] Qwen reported {len(findings)} issues. Performing anti-hallucination verification...")
-    verified = filter_hallucinations(project_path, findings, ast_metadata)
+    db_path = os.path.join(project_path, ".code-review-graph", "graph.db")
+    verified = filter_hallucinations(project_path, findings, db_path)
     print(f"[Reviewer] Verified {len(verified)} / {len(findings)} findings.")
     
     if not verified:
@@ -920,8 +945,9 @@ class ProjectChangeHandler(FileSystemEventHandler):
                     pass
 
 def main():
+    default_base = os.path.dirname(ORCHESTRATOR_DIR)
     parser = argparse.ArgumentParser(description="Multi-Project Code Review & Self-Healing Loop")
-    parser.add_argument("--base", type=str, default="/home/chitrarth/Chitrarth", help="Base workspace path to traverse")
+    parser.add_argument("--base", type=str, default=default_base, help="Base workspace path to traverse")
     parser.add_argument("--loop", action="store_true", help="Run continuously in a watcher loop")
     parser.add_argument("--interval", type=int, default=300, help="Interval in seconds between runs in loop mode (default: 300)")
     parser.add_argument("--watch", action="store_true", help="Watch base directory for immediate file modifications and review dynamically")
@@ -989,16 +1015,7 @@ def main():
         
         # Instantiate dynamic gitignore and crawler
         ignore_parser = GitIgnoreParser(base_path)
-        dirs_file_path = os.path.join(base_path, "dirlist_temp.txt")
-        generate_dirs_file(dirs_file_path, base_path, ignore_parser)
-        try:
-            roots = find_project_roots_from_file(dirs_file_path, base_path, ignore_parser)
-        finally:
-            if os.path.exists(dirs_file_path):
-                try:
-                    os.remove(dirs_file_path)
-                except Exception:
-                    pass
+        roots = find_project_roots(base_path, ignore_parser)
         print(f"[Master] Found {len(roots)} projects to review.")
         
         for r in roots:

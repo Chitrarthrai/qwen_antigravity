@@ -4,11 +4,16 @@ import urllib.request
 import re
 import argparse
 
-# Configuration
-PROFILES_PATH = "/home/chitrarth/Chitrarth/Project P/qwen_antigravity/project_profiles.json"
-RESUME_PATH = "/home/chitrarth/Chitrarth/Project P/overleaf/main.tex"
+# Dynamic Paths Configuration
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(SCRIPT_DIR) if os.path.basename(SCRIPT_DIR) == "backend" else SCRIPT_DIR
+PARENT_DIR = os.path.dirname(ROOT_DIR)
+
+PROFILES_PATH = os.path.join(ROOT_DIR, "project_profiles.json")
+ATS_CONFIG_PATH = os.path.join(ROOT_DIR, "ats_config.json")
+RESUME_PATH = os.path.join(PARENT_DIR, "overleaf", "main.tex")
+
 OLLAMA_MODEL = "qwen2.5:14b"
-ATS_CONFIG_PATH = "/home/chitrarth/Chitrarth/Project P/qwen_antigravity/ats_config.json"
 
 def query_qwen(prompt, json_format=False):
     payload = {
@@ -91,6 +96,10 @@ def optimize_resume(jd_keywords):
     with open(PROFILES_PATH, "r", encoding="utf-8") as f:
         profiles = json.load(f)
         
+    if not os.path.exists(RESUME_PATH):
+        print(f"Resume LaTeX not found at {RESUME_PATH}.")
+        return False
+        
     with open(RESUME_PATH, "r", encoding="utf-8") as f:
         resume_content = f.read()
         
@@ -131,7 +140,6 @@ Return ONLY the updated LaTeX block for the Technical Skills section. No explana
     updated_skills_clean = clean_latex(updated_skills)
     
     # 2. Update Projects or Experience to match ATS requirements
-    # Specifically highlighting the security/VAPT updates in IRM neodisha_native
     print("\n[ATS] Optimizing Experience and Projects bullet points with VAPT, Security, and other matched accomplishments...")
     
     # Find neodisha_native IRM profile details
@@ -176,7 +184,7 @@ Return ONLY the updated Projects LaTeX block. No explanation.
     updated_projects = query_qwen(projects_prompt)
     updated_projects_clean = clean_latex(updated_projects)
     
-    # 3. Update Experience Section (specifically Neophyte AI role to highlight Neo Disha security and other ATS matches)
+    # 3. Update Experience Section
     print("\n[ATS] Tailoring Experience bullets...")
     exp_prompt = f"""You are a professional resume writer. Tailor the Experience section below to highlight relevant skills.
 Specifically, enhance the "Neo Disha (mobile)" and "NeoQCR" items to include:

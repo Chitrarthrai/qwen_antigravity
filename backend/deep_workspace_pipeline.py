@@ -4,14 +4,24 @@ import json
 import sqlite3
 import subprocess
 import urllib.request
+import sys
 
-# Configuration
-WORKSPACE_DIR = "/home/chitrarth/Chitrarth"
-OUTPUT_PROFILE_PATH = "/home/chitrarth/Chitrarth/Project P/qwen_antigravity/project_profiles.json"
+# Dynamic Paths Configuration
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(SCRIPT_DIR) # Enable importing sibling modules
+
+ROOT_DIR = os.path.dirname(SCRIPT_DIR) if os.path.basename(SCRIPT_DIR) == "backend" else SCRIPT_DIR
+PARENT_DIR = os.path.dirname(ROOT_DIR)
+
+WORKSPACE_DIR = os.path.dirname(PARENT_DIR) # Two levels up from ROOT_DIR (/home/chitrarth/Chitrarth)
+OUTPUT_PROFILE_PATH = os.path.join(ROOT_DIR, "project_profiles.json")
+RESUME_PATH = os.path.join(PARENT_DIR, "overleaf", "main.tex")
+ATS_CONFIG_PATH = os.path.join(ROOT_DIR, "ats_config.json")
+
+from validate_latex import validate_latex
+
 OLLAMA_MODEL = "qwen2.5:14b"
 CRG_PATH = "/home/chitrarth/.local/bin/code-review-graph"
-RESUME_PATH = "/home/chitrarth/Chitrarth/Project P/overleaf/main.tex"
-ATS_CONFIG_PATH = "/home/chitrarth/Chitrarth/Project P/qwen_antigravity/ats_config.json"
 
 EXCLUDED_DIRS = {
     "node_modules", "venv", ".git", ".next", ".expo", ".gradle", "build", 
@@ -153,74 +163,59 @@ Project Metadata:
     except Exception:
         return None
 
-def validate_latex(filepath):
-    print("\n[Pipeline] Validating LaTeX Syntax for main.tex...")
-    if not os.path.exists(filepath):
-        print(f"File not found: {filepath}")
-        return False
-        
-    with open(filepath, "r", encoding="utf-8") as f:
-        content = f.read()
-        
-    errors = []
-    
-    # 1. Check matching environments \begin{...} and \end{...}
-    begins = re.findall(r'\\begin\{([a-zA-Z\*]+)\}', content)
-    ends = re.findall(r'\\end\{([a-zA-Z\*]+)\}', content)
-    
-    if len(begins) != len(ends):
-        errors.append(f"Mismatched count of environments: \\begin occurs {len(begins)} times, \\end occurs {len(ends)} times.")
-        
-    for b, e in zip(begins, ends):
-        if b != e:
-            errors.append(f"Mismatched environment sequence: \\begin{{{b}}} paired with \\end{{{e}}}")
-            break
-            
-    # 2. Check braces balance (excluding escaped \{ and \})
-    braces_str = re.sub(r'\\\{', '', content)
-    braces_str = re.sub(r'\\\}', '', braces_str)
-    
-    open_count = braces_str.count('{')
-    close_count = braces_str.count('}')
-    
-    if open_count != close_count:
-        errors.append(f"Curly braces are unbalanced: '{'{'}' occurs {open_count} times, '{'}'}' occurs {close_count} times.")
-        
-    # 3. Check for raw percentage signs
-    lines = content.split('\n')
-    for idx, line in enumerate(lines):
-        # Ignore comments and escaped \%
-        line_clean = re.sub(r'\\%', '', line)
-        if '%' in line_clean:
-            comment_start = line_clean.find('%')
-            # Check if this is a comment or a raw percentage (in LaTeX, % starts a comment, which is fine, but we should verify it doesn't break macro values)
-            pass
-            
-    if errors:
-        print("[LaTeX Check] FAILED with errors:")
-        for err in errors:
-            print(f" - {err}")
-        return False
-        
-    print("[LaTeX Check] PASSED! No structural environment or braces issues found.")
-    return True
+def get_git_commit_hash(project_path):
+    try:
+        res = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=project_path, capture_output=True, text=True, timeout=5
+        )
+        if res.returncode == 0:
+            return res.stdout.strip()
+    except Exception:
+        pass
+    return None
 
 def run_pipeline():
     # Step 1: Deep analysis of all projects
     roots = find_project_roots(WORKSPACE_DIR)
     print(f"[Pipeline] Found {len(roots)} projects to analyze.")
     
+    # Load cached profiles
+    cached_profiles = {}
+    if os.path.exists(OUTPUT_PROFILE_PATH):
+        try:
+            with open(OUTPUT_PROFILE_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                for p in data:
+                    if "path" in p:
+                        cached_profiles[p["path"]] = p
+        except Exception:
+            pass
+            
     profiles = []
     # For speed, we will limit Qwen queries to projects that have active code
     for r in roots:
-        profile = deep_analyze_project(r)
-        if profile:
-            profiles.append(profile)
+        commit_hash = get_git_commit_hash(r)
+        cached = cached_profiles.get(r)
+        
+        # Check if we can reuse cache
+        if cached and cached.get("git_hash") == commit_hash and commit_hash is not None:
+            print(f"[Pipeline] Reusing cached profile for {os.path.basename(r)} (commit {commit_hash})")
+            profiles.append(cached)
+        else:
+            profile = deep_analyze_project(r)
+            if profile:
+                profile["git_hash"] = commit_hash
+                profile["path"] = r
+                profiles.append(profile)
             
-    # Save profiles
-    os.makedirs(os.path.dirname(OUTPUT_PROFILE_PATH), exist_ok=True)
-    with open(OUTPUT_PROFILE_PATH, "w", encoding="utf-8") as f:
-        json.dump(profiles, f, indent=2)
+        # Progressive save after each step to allow interruption recovery
+        try:
+            os.makedirs(os.path.dirname(OUTPUT_PROFILE_PATH), exist_ok=True)
+            with open(OUTPUT_PROFILE_PATH, "w", encoding="utf-8") as f:
+                json.dump(profiles, f, indent=2)
+        except Exception:
+            pass
     print(f"\n[Pipeline] Deep project profiles cached successfully to {OUTPUT_PROFILE_PATH}!")
     
     # Step 2: Run ATS Optimization using the target/default JD
@@ -280,7 +275,7 @@ Return ONLY updated LaTeX. No comments.
 """
     updated_skills = clean_latex(query_qwen(skills_prompt))
     
-    # 2. Projects update (expand, add more words and list tech separately)
+    # 2. Projects update
     projects_prompt = f"""Rewrite the Projects LaTeX section. For each project:
 1. List technologies separately under a first bullet point like: \\resumeItem{{\\textbf{{Technologies Used:}} ...}}
 2. Add more descriptive words and expand highlights to match the deep AST architecture details (ONNX Runtime, Metro transformer, WebSocket, SQLite, etc.) and VAPT.
@@ -294,7 +289,7 @@ Return ONLY updated LaTeX. No comments.
 """
     updated_projects = clean_latex(query_qwen(projects_prompt))
     
-    # 3. Experience update (more words, metrics)
+    # 3. Experience update
     exp_prompt = f"""Rewrite the Experience LaTeX section. Expand details for Neo Disha, NeoQCR, and Disha to include VAPT security metrics and Reliance Environments.
 Original Experience:
 {experience_header}
